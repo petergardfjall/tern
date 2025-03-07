@@ -62,11 +62,74 @@ func (e MigrationPgError) Unwrap() error {
 	return e.PgError
 }
 
+type MigrationStep interface {
+	GetName() string
+	GetSequence() int32
+
+	SupportsTx() bool
+	Up(context.Context, *pgx.Conn) error
+	UpTx(context.Context, *pgx.Conn) error
+	Down(context.Context, *pgx.Conn) error
+	DownTx(context.Context, *pgx.Conn) error
+}
+
+var _ MigrationStep = new(Migration)
+
 type Migration struct {
 	Sequence int32
 	Name     string
 	UpSQL    string
 	DownSQL  string
+}
+
+func (m *Migration) GetSequence() int32 { return m.Sequence }
+
+func (m *Migration) GetName() string { return m.Name }
+
+func (m *Migration) SupportsTx() bool {
+	// TODO needed for DownSQL?
+	return !disableTxPattern.MatchString(m.UpSQL)
+}
+
+func (m *Migration) Up(ctx context.Context, conn *pgx.Conn) error {
+	sql := disableTxPattern.ReplaceAllLiteralString(m.UpSQL, "")
+	sqlStatements := sqlsplit.Split(sql)
+	return m.connExec(ctx, sqlStatements, conn)
+}
+
+func (m *Migration) UpTx(ctx context.Context, conn *pgx.Conn) error {
+	sqlStatements := []string{m.UpSQL}
+	return m.connExec(ctx, sqlStatements, conn)
+}
+
+func (m *Migration) Down(ctx context.Context, conn *pgx.Conn) error {
+	if m.DownSQL == "" {
+		return IrreversibleMigrationError{m: m}
+	}
+	sql := disableTxPattern.ReplaceAllLiteralString(m.DownSQL, "")
+	sqlStatements := sqlsplit.Split(sql)
+	return m.connExec(ctx, sqlStatements, conn)
+}
+
+func (m *Migration) DownTx(ctx context.Context, conn *pgx.Conn) error {
+	if m.DownSQL == "" {
+		return IrreversibleMigrationError{m: m}
+	}
+	sqlStatements := []string{m.DownSQL}
+	// TODO m.OnStart()
+	return m.connExec(ctx, sqlStatements, conn)
+}
+
+func (m Migration) connExec(ctx context.Context, sqlStatements []string, conn *pgx.Conn) error {
+	for _, statement := range sqlStatements {
+		if _, err := conn.Exec(ctx, statement); err != nil {
+			if err, ok := err.(*pgconn.PgError); ok {
+				return MigrationPgError{MigrationName: m.Name, Sql: statement, PgError: err}
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 type MigratorOptions struct {
@@ -78,9 +141,9 @@ type Migrator struct {
 	conn         *pgx.Conn
 	versionTable string
 	options      *MigratorOptions
-	Migrations   []*Migration
+	Migrations   []MigrationStep
 	OnStart      func(int32, string, string, string) // OnStart is called when a migration is run with the sequence, name, direction, and SQL
-	Data         map[string]interface{}              // Data available to use in migrations
+	Data         map[string]any                      // Data available to use in migrations
 }
 
 // NewMigrator initializes a new Migrator. It is highly recommended that versionTable be schema qualified.
@@ -98,8 +161,8 @@ func NewMigratorEx(ctx context.Context, conn *pgx.Conn, versionTable string, opt
 	if conn != nil {
 		err = m.ensureSchemaVersionTableExists(ctx)
 	}
-	m.Migrations = make([]*Migration, 0)
-	m.Data = make(map[string]interface{})
+	m.Migrations = make([]MigrationStep, 0)
+	m.Data = make(map[string]any)
 	return
 }
 
@@ -252,14 +315,18 @@ func (m *Migrator) evalMigration(tmpl *template.Template, sql string) (string, e
 }
 
 func (m *Migrator) AppendMigration(name, upSQL, downSQL string) {
-	m.Migrations = append(
-		m.Migrations,
+	m.AppendMigrationStep(
 		&Migration{
 			Sequence: int32(len(m.Migrations)) + 1,
 			Name:     name,
 			UpSQL:    upSQL,
 			DownSQL:  downSQL,
 		})
+	return
+}
+
+func (m *Migrator) AppendMigrationStep(step MigrationStep) {
+	m.Migrations = append(m.Migrations, step)
 	return
 }
 
@@ -318,36 +385,20 @@ func (m *Migrator) MigrateTo(ctx context.Context, targetVersion int32) (err erro
 	}
 
 	for currentVersion != targetVersion {
-		var current *Migration
-		var sql, directionName string
+		var current MigrationStep
+		var directionName string
 		var sequence int32
 		if direction == 1 {
 			current = m.Migrations[currentVersion]
-			sequence = current.Sequence
-			sql = current.UpSQL
+			sequence = current.GetSequence()
 			directionName = "up"
 		} else {
 			current = m.Migrations[currentVersion-1]
-			sequence = current.Sequence - 1
-			sql = current.DownSQL
+			sequence = current.GetSequence() - 1
 			directionName = "down"
-			if current.DownSQL == "" {
-				return IrreversibleMigrationError{m: current}
-			}
 		}
 
-		useTx := !m.options.DisableTx
-		var sqlStatements []string
-		if disableTxPattern.MatchString(sql) {
-			useTx = false
-			sql = disableTxPattern.ReplaceAllLiteralString(sql, "")
-		}
-
-		if useTx {
-			sqlStatements = []string{sql}
-		} else {
-			sqlStatements = sqlsplit.Split(sql)
-		}
+		useTx := !m.options.DisableTx && current.SupportsTx()
 
 		var tx pgx.Tx
 		if useTx {
@@ -358,20 +409,34 @@ func (m *Migrator) MigrateTo(ctx context.Context, targetVersion int32) (err erro
 			defer tx.Rollback(ctx)
 		}
 
+		// TODO place in Migration?
 		// Fire on start callback
 		if m.OnStart != nil {
-			m.OnStart(current.Sequence, current.Name, directionName, sql)
+			migration, ok := current.(*Migration)
+			if ok {
+				sql := migration.UpSQL
+				if directionName == "down" {
+					sql = migration.DownSQL
+				}
+				m.OnStart(sequence, migration.Name, directionName, sql)
+			}
 		}
 
 		// Execute the migration
-		for _, statement := range sqlStatements {
-			_, err = m.conn.Exec(ctx, statement)
-			if err != nil {
-				if err, ok := err.(*pgconn.PgError); ok {
-					return MigrationPgError{MigrationName: current.Name, Sql: statement, PgError: err}
-				}
-				return err
+		var execFunc func(context.Context, *pgx.Conn) error
+		if directionName == "up" {
+			execFunc = current.Up
+			if useTx {
+				execFunc = current.UpTx
 			}
+		} else {
+			execFunc = current.Down
+			if useTx {
+				execFunc = current.DownTx
+			}
+		}
+		if err := execFunc(ctx, m.conn); err != nil {
+			return err
 		}
 
 		// Reset all database connection settings. Important to do before updating version as search_path may have been changed.

@@ -51,7 +51,7 @@ func currentVersion(t testing.TB, conn *pgx.Conn) int32 {
 	return n
 }
 
-func mustExec(t testing.TB, conn *pgx.Conn, sql string, arguments ...interface{}) pgconn.CommandTag {
+func mustExec(t testing.TB, conn *pgx.Conn, sql string, arguments ...any) pgconn.CommandTag {
 	commandTag, err := conn.Exec(context.Background(), sql, arguments...)
 	assert.NoError(t, err)
 	return commandTag
@@ -115,9 +115,9 @@ func TestAppendMigration(t *testing.T) {
 	m.AppendMigration(name, upSQL, downSQL)
 
 	assert.Len(t, m.Migrations, 1)
-	assert.Equal(t, m.Migrations[0].Name, name)
-	assert.Equal(t, m.Migrations[0].UpSQL, upSQL)
-	assert.Equal(t, m.Migrations[0].DownSQL, downSQL)
+	assert.Equal(t, m.Migrations[0].(*migrate.Migration).Name, name)
+	assert.Equal(t, m.Migrations[0].(*migrate.Migration).UpSQL, upSQL)
+	assert.Equal(t, m.Migrations[0].(*migrate.Migration).DownSQL, downSQL)
 }
 
 // func TestLoadMigrationsMissingDirectory(t *testing.T) {
@@ -172,34 +172,34 @@ func TestLoadMigrations(t *testing.T) {
 	defer conn.Close(context.Background())
 	m := createEmptyMigrator(t, conn)
 
-	m.Data = map[string]interface{}{"prefix": "foo"}
+	m.Data = map[string]any{"prefix": "foo"}
 	err := m.LoadMigrations(os.DirFS("testdata/sample"))
 	require.NoError(t, err)
 	require.Len(t, m.Migrations, 6)
 
-	assert.Equal(t, "001_create_t1.sql", m.Migrations[0].Name)
+	assert.Equal(t, "001_create_t1.sql", m.Migrations[0].(*migrate.Migration).Name)
 	assert.Equal(t, `create table t1(
   id serial primary key
-);`, m.Migrations[0].UpSQL)
-	assert.Equal(t, "drop table t1;", m.Migrations[0].DownSQL)
+);`, m.Migrations[0].(*migrate.Migration).UpSQL)
+	assert.Equal(t, "drop table t1;", m.Migrations[0].(*migrate.Migration).DownSQL)
 
-	assert.Equal(t, "002_create_t2.sql", m.Migrations[1].Name)
+	assert.Equal(t, "002_create_t2.sql", m.Migrations[1].(*migrate.Migration).Name)
 	assert.Equal(t, `create table t2(
   id serial primary key
-);`, m.Migrations[1].UpSQL)
-	assert.Equal(t, "drop table t2;", m.Migrations[1].DownSQL)
+);`, m.Migrations[1].(*migrate.Migration).UpSQL)
+	assert.Equal(t, "drop table t2;", m.Migrations[1].(*migrate.Migration).DownSQL)
 
-	assert.Equal(t, "003_irreversible.sql", m.Migrations[2].Name)
-	assert.Equal(t, "drop table t2;", m.Migrations[2].UpSQL)
-	assert.Equal(t, "", m.Migrations[2].DownSQL)
+	assert.Equal(t, "003_irreversible.sql", m.Migrations[2].(*migrate.Migration).Name)
+	assert.Equal(t, "drop table t2;", m.Migrations[2].(*migrate.Migration).UpSQL)
+	assert.Equal(t, "", m.Migrations[2].(*migrate.Migration).DownSQL)
 
-	assert.Equal(t, "004_data_interpolation.sql", m.Migrations[3].Name)
-	assert.Equal(t, "create table foo_bar(id serial primary key);", m.Migrations[3].UpSQL)
-	assert.Equal(t, "drop table foo_bar;", m.Migrations[3].DownSQL)
+	assert.Equal(t, "004_data_interpolation.sql", m.Migrations[3].(*migrate.Migration).Name)
+	assert.Equal(t, "create table foo_bar(id serial primary key);", m.Migrations[3].(*migrate.Migration).UpSQL)
+	assert.Equal(t, "drop table foo_bar;", m.Migrations[3].(*migrate.Migration).DownSQL)
 
-	assert.Equal(t, "006_sprig.sql", m.Migrations[5].Name)
-	assert.Equal(t, "create table baz_42(id serial primary key);", m.Migrations[5].UpSQL)
-	assert.Equal(t, "drop table baz_42;", m.Migrations[5].DownSQL)
+	assert.Equal(t, "006_sprig.sql", m.Migrations[5].(*migrate.Migration).Name)
+	assert.Equal(t, "create table baz_42(id serial primary key);", m.Migrations[5].(*migrate.Migration).UpSQL)
+	assert.Equal(t, "drop table baz_42;", m.Migrations[5].(*migrate.Migration).DownSQL)
 }
 
 func TestLoadMigrationsNoForward(t *testing.T) {
@@ -209,7 +209,7 @@ func TestLoadMigrationsNoForward(t *testing.T) {
 	m, err := migrate.NewMigrator(context.Background(), conn, versionTable)
 	assert.NoError(t, err)
 
-	m.Data = map[string]interface{}{"prefix": "foo"}
+	m.Data = map[string]any{"prefix": "foo"}
 	err = m.LoadMigrations(os.DirFS("testdata/noforward"))
 	require.Equal(t, migrate.ErrNoFwMigration, err)
 }
@@ -439,7 +439,7 @@ func TestNotCreatingVersionTableIfAlreadyVisibleInSearchPath(t *testing.T) {
 	require.EqualValues(t, 3, mCurrentVersion)
 }
 
-func Example_OnStartMigrationProgressLogging() {
+func Example_onStartMigrationProgressLogging() {
 	conn, err := pgx.Connect(context.Background(), os.Getenv("MIGRATE_TEST_CONN_STRING"))
 	if err != nil {
 		fmt.Printf("Unable to establish connection: %v", err)

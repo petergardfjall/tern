@@ -1432,12 +1432,12 @@ func PlanMigration(migrator *migrate.Migrator, currentVersion, targetVersion int
 		var sql string
 		var sequence int32
 		if direction == 1 {
-			current = migrator.Migrations[currentVersion]
+			current = migrator.Migrations[currentVersion].(*migrate.Migration)
 			sequence = current.Sequence
 			sql = current.UpSQL
 
 		} else {
-			current = migrator.Migrations[currentVersion-1]
+			current = migrator.Migrations[currentVersion-1].(*migrate.Migration)
 			sequence = current.Sequence - 1
 			sql = current.DownSQL
 		}
